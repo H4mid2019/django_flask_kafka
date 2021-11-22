@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: ./related_flask/Dockerfile
-    command: 'python ./related_flask/app.py'
+    command: bash -c "cd related_flask/ && flask db upgrade && python app.py"
     network_mode: host
     volumes:
       - .:/app
@@ -20,7 +20,7 @@ services:
     depends_on:
       - flask_db
       - flask
-      - kafka
+#      - kafka
       
   flask_db:
     image: postgres:14.0
@@ -34,4 +34,4 @@ services:
       - ./related_flask/.dbdata:/var/lib/postgresql/data
       - ./related_flask/.data:/data
     ports:
-      - 5434:5432
+      - "5434:5432"

@@ -4,9 +4,10 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from sqlalchemy.dialects.postgresql import JSON
+from datetime import datetime
 
 app = Flask(__name__)
- 
+
 app.config['SQLALCHEMY_DATABASE_URI'] = "postgresql://related_flask:related_flask@127.0.0.1:5434/related_flask"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -24,6 +25,7 @@ class Post(db.Model):
     body: str
     slug: str
     related: dict
+    add_date: datetime
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=False)
     title = db.Column(db.String(200))
@@ -31,6 +33,8 @@ class Post(db.Model):
     body = db.Column(db.String(1500))
     slug = db.Column(db.String(250))
     related = db.Column(JSON)
+    add_date = db.Column(db.DateTime, nullable=False,
+                         default=datetime.utcnow)
 
     def __repr__(self) -> str:
         return f"<title={self.title}>"
@@ -39,7 +43,7 @@ class Post(db.Model):
 @app.route('/posts')
 def posts():
     return jsonify(Post.query.all())
- 
+
 
 @app.route('/')
 def index():

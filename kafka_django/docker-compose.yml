@@ -4,13 +4,14 @@ services:
     build:
       context: .
       dockerfile: ./kafka_django/Dockerfile
-    command: 'python ./kafka_django/manage.py runserver 0.0.0.0:8000'
+    command: bash -c "python ./kafka_django/manage.py makemigrations && 
+      python ./kafka_django/manage.py migrate &&
+      python ./kafka_django/manage.py runserver 0.0.0.0:8000"
     network_mode: host
     volumes:
       - .:/app
     depends_on:
       - db
-      - kafka
 
   db:
     image: postgres:14.0
@@ -24,4 +25,4 @@ services:
       - ./kafka_django/.dbdata:/var/lib/postgresql/data
       - ./kafka_django/.data:/data
     ports:
-      - 5433:5432
+      - "5433:5432"

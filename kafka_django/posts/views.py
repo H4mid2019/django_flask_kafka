@@ -45,8 +45,8 @@ class PostViewSet(viewsets.ViewSet):
             post = Post.objects.get(slug=slug)
             print("here", bool(post))
             post.delete()
-            producer('post_deleted', slug)
+            producer('post_deleted', {"slug": slug})
             return Response(status=status.HTTP_204_NO_CONTENT)
         except Post.DoesNotExist:
-            content = {'post': 'doesn\'t exist, please try again with correspond slug.'}
+            content = {'post': 'does\'t exist, please try again with correspond slug.'}
             return Response(content, status=status.HTTP_404_NOT_FOUND)
