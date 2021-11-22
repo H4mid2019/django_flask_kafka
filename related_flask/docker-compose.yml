@@ -1,0 +1,37 @@
+version: '3.8'
+services:
+  flask:
+    build:
+      context: .
+      dockerfile: ./related_flask/Dockerfile
+    command: 'python ./related_flask/app.py'
+    network_mode: host
+    volumes:
+      - .:/app
+    depends_on:
+      - flask_db
+
+  consumer:
+    build:
+      context: .
+      dockerfile: ./related_flask/Dockerfile
+    command: 'python ./related_flask/consumer.py'
+    network_mode: host
+    depends_on:
+      - flask_db
+      - flask
+      - kafka
+      
+  flask_db:
+    image: postgres:14.0
+    restart: always
+    environment:
+      POSTGRES_DB: related_flask
+      POSTGRES_USER: related_flask
+      POSTGRES_PASSWORD: related_flask
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - ./related_flask/.dbdata:/var/lib/postgresql/data
+      - ./related_flask/.data:/data
+    ports:
+      - 5434:5432

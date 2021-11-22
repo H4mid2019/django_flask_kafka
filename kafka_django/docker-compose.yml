@@ -1,0 +1,27 @@
+version: '3.8'
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: ./kafka_django/Dockerfile
+    command: 'python ./kafka_django/manage.py runserver 0.0.0.0:8000'
+    network_mode: host
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - kafka
+
+  db:
+    image: postgres:14.0
+    restart: always
+    environment:
+      POSTGRES_DB: kafka_django
+      POSTGRES_USER: kafka_django
+      POSTGRES_PASSWORD: kafka_django
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - ./kafka_django/.dbdata:/var/lib/postgresql/data
+      - ./kafka_django/.data:/data
+    ports:
+      - 5433:5432
