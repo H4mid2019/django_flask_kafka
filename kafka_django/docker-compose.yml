@@ -7,6 +7,8 @@ services:
     command: bash -c "python ./kafka_django/manage.py makemigrations && 
       python ./kafka_django/manage.py migrate &&
       python ./kafka_django/manage.py runserver 0.0.0.0:8000"
+    environment:
+      DJANGO_SECRET_KEY: "django-insecure-whod!73b&*7kd96^_yd#zvlujj*ev*&=lxkdxo!5e)m&c@+9i%"
     network_mode: host
     volumes:
       - .:/app
