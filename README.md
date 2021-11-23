@@ -7,11 +7,11 @@ Django, Flask, Docker, PostgreSQL, Kafka
 
 ## The Concept
 
-It demonstrates two separate conternized apps by docker. One of them is Django, and the other one is Flask, which they can communicate 
-by a message broker (Kafka). For instance, here, the concept is that Django is the backend which the user creates, 
-updates, or deletes posts via its endpoint API, then the Flask app calculates and finds out the related posts, and 
-it saves them in its database separately. To retrieve the posts with their related posts, 
-you have to call the Flask endpoint API.
+It demonstrates **two separate conternized apps** by docker. One of them is _Django_, and the other one is _Flask_, 
+which **they can communicate by a message broker** (_Kafka_). For instance, here, the concept is that Django is the 
+backend which the user creates, updates, or deletes posts via its endpoint API, then the Flask app calculates and
+finds out the related posts, and it saves them in its database separately. To retrieve the posts with their
+related posts, you have to call the Flask endpoint API.
 
 
 ## Prerequisites
