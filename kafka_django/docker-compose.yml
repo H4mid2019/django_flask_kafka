@@ -4,11 +4,14 @@ services:
     build:
       context: .
       dockerfile: ./kafka_django/Dockerfile
-    command: bash -c "python ./kafka_django/manage.py makemigrations && 
+    command: bash -c "chmod +x ./wait-for-postgres.sh && ./wait-for-postgres.sh 127.0.0.1 5433 && python ./kafka_django/manage.py makemigrations && 
       python ./kafka_django/manage.py migrate &&
       python ./kafka_django/manage.py runserver 0.0.0.0:8000"
     environment:
       DJANGO_SECRET_KEY: "django-insecure-whod!73b&*7kd96^_yd#zvlujj*ev*&=lxkdxo!5e)m&c@+9i%"
+      POSTGRES_DB: kafka_django
+      POSTGRES_USER: kafka_django
+      POSTGRES_PASSWORD: kafka_django
     network_mode: host
     volumes:
       - .:/app

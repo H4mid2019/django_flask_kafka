@@ -4,8 +4,12 @@ services:
     build:
       context: .
       dockerfile: ./related_flask/Dockerfile
-    command: bash -c "cd related_flask/ && flask db upgrade && python app.py"
+    command: bash -c "./wait-for-postgres.sh 127.0.0.1 5434 && cd related_flask/ && flask db upgrade && python app.py"
     network_mode: host
+    environment:
+      POSTGRES_DB: related_flask
+      POSTGRES_USER: related_flask
+      POSTGRES_PASSWORD: related_flask
     volumes:
       - .:/app
     depends_on:
