@@ -1,0 +1,141 @@
+# One file for the whole system: two services with their own databases, a relay
+# between them, and Kafka.
+#
+# There is no wait-for-postgres.sh. Compose has expressed "start this after that
+# one is actually ready" since 2.x through healthchecks and
+# depends_on.condition, so a shell script polling a port is redundant, and the
+# script version could not tell a listening socket from a database ready to
+# accept queries.
+#
+# Kafka runs in KRaft mode, so there is no Zookeeper.
+
+services:
+  posts-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: posts
+      POSTGRES_USER: posts
+      POSTGRES_PASSWORD: posts
+    volumes:
+      - posts-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U posts -d posts"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  related-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: related
+      POSTGRES_USER: related
+      POSTGRES_PASSWORD: related
+    volumes:
+      - related-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U related -d related"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    # Official Apache image, KRaft mode, so no Zookeeper.
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      # Asks the broker to list topics. An open port only proves the JVM
+      # started, not that the broker will accept a produce request.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 24
+      start_period: 15s
+
+  posts-migrate:
+    build: ./services/posts
+    command: python manage.py migrate --no-input
+    environment:
+      DJANGO_DEBUG: "true"
+      POSTGRES_HOST: posts-db
+    depends_on:
+      posts-db:
+        condition: service_healthy
+
+  posts:
+    build: ./services/posts
+    command: gunicorn config.wsgi:application -b 0.0.0.0:8000 -w 3
+    environment:
+      DJANGO_DEBUG: "true"
+      ALLOWED_HOSTS: localhost,127.0.0.1,posts
+      POSTGRES_HOST: posts-db
+    ports:
+      - "8000:8000"
+    depends_on:
+      # Waits for the migration container to exit 0, so the API never serves
+      # against a schema that has not been applied.
+      posts-migrate:
+        condition: service_completed_successfully
+
+  relay:
+    build: ./services/relay
+    environment:
+      DATABASE_URL: postgresql://posts:posts@posts-db:5432/posts
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      posts-migrate:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  related-migrate:
+    build: ./services/related
+    command: flask db upgrade
+    environment:
+      FLASK_APP: app.py
+      DATABASE_URL: postgresql+psycopg://related:related@related-db:5432/related
+    depends_on:
+      related-db:
+        condition: service_healthy
+
+  related:
+    build: ./services/related
+    command: gunicorn app:app -b 0.0.0.0:5000 -w 2
+    environment:
+      DATABASE_URL: postgresql+psycopg://related:related@related-db:5432/related
+    ports:
+      - "5000:5000"
+    depends_on:
+      related-migrate:
+        condition: service_completed_successfully
+
+  related-consumer:
+    build: ./services/related
+    command: python consumer.py
+    environment:
+      DATABASE_URL: postgresql+psycopg://related:related@related-db:5432/related
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_GROUP_ID: related-service
+    depends_on:
+      related-migrate:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  posts-data:
+  related-data:
