@@ -1,0 +1,4 @@
+# Test and lint tooling, kept out of the runtime image.
+pytest==8.3.4
+pytest-django==4.9.0
+ruff==0.8.4
