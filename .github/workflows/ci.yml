@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  posts:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: posts
+          POSTGRES_USER: posts
+          POSTGRES_PASSWORD: posts
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U posts -d posts"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      DJANGO_DEBUG: "true"
+      POSTGRES_HOST: localhost
+    defaults:
+      run:
+        working-directory: services/posts
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: ruff check .
+      - name: Missing migrations
+        run: python manage.py makemigrations --check --dry-run
+      - run: python manage.py test
+      - name: Deployment checks
+        env:
+          DJANGO_DEBUG: "false"
+          DJANGO_SECRET_KEY: a-sufficiently-long-secret-key-used-only-by-this-check
+          ALLOWED_HOSTS: example.com
+        run: python manage.py check --deploy --fail-level WARNING
+
+  related:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/related
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: ruff check .
+      # These run on SQLite and never open a socket, so a broken handler fails
+      # here rather than in the slower end to end job.
+      - run: python -m pytest tests/ -q
+
+  relay:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/relay
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt ruff==0.8.4
+      - run: ruff check .
+      - run: python -c "import ast,sys; ast.parse(open('relay.py').read())"
+
+  end-to-end:
+    # The claim this repo makes is that a write in one service reaches the other
+    # through Kafka. That is only worth believing if something checks it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Start the stack
+        run: docker compose up -d --build
+
+      - name: Wait for both APIs
+        run: |
+          for i in $(seq 1 60); do
+            curl -fs localhost:8000/api/posts >/dev/null 2>&1 && \
+            curl -fs localhost:5000/health >/dev/null 2>&1 && exit 0
+            sleep 3
+          done
+          docker compose logs
+          exit 1
+
+      - name: A post created in one service reaches the other
+        run: |
+          curl -fsS -X POST localhost:8000/api/posts \
+            -H 'content-type: application/json' \
+            -d '{"title":"Kafka streams tutorial","body":"b","slug":"ci-one","image":""}'
+
+          for i in $(seq 1 40); do
+            if curl -fs localhost:5000/posts/ci-one >/dev/null 2>&1; then
+              echo "propagated"
+              curl -s localhost:5000/posts/ci-one
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "event never arrived"
+          docker compose logs relay related-consumer
+          exit 1
+
+      - name: The outbox survives a broker outage
+        run: |
+          docker compose stop kafka
+          curl -fsS -X POST localhost:8000/api/posts \
+            -H 'content-type: application/json' \
+            -d '{"title":"Written during an outage","body":"b","slug":"ci-outage","image":""}'
+
+          pending=$(docker compose exec -T posts-db psql -U posts -d posts -tAc \
+            "SELECT count(*) FROM posts_outboxevent WHERE published_at IS NULL")
+          echo "pending events while the broker is down: $pending"
+          [ "$pending" -ge 1 ] || { echo "expected the event to queue"; exit 1; }
+
+          docker compose start kafka
+          for i in $(seq 1 60); do
+            if curl -fs localhost:5000/posts/ci-outage >/dev/null 2>&1; then
+              echo "outbox drained after the broker came back"
+              exit 0
+            fi
+            sleep 3
+          done
+          docker compose logs relay
+          exit 1
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
