@@ -1,0 +1,9 @@
+Flask==3.1.0
+Flask-SQLAlchemy==3.1.1
+Flask-Migrate==4.0.7
+Flask-Cors==5.0.0
+SQLAlchemy==2.0.36
+psycopg[binary]==3.2.3
+kafka-python-ng==2.2.3
+strsimpy==0.2.1
+gunicorn==23.0.0
