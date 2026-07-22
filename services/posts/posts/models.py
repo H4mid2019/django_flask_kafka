@@ -61,3 +61,34 @@ class OutboxEvent(models.Model):
     def __str__(self) -> str:
         state = "published" if self.published_at else "pending"
         return f"{self.topic}/{self.key} ({state})"
+
+
+class RevokedToken(models.Model):
+    """Access tokens refused before their expiry.
+
+    Kept in the database rather than in process memory because this service runs
+    several gunicorn workers. An in-memory denylist would only reach whichever
+    worker happened to consume the event, so the same revoked token would be
+    rejected by one worker and accepted by the next.
+
+    Written by the token_revoked consumer, read on every authenticated request.
+    Rows are removed once the token would have expired anyway; see
+    purge_expired_revocations.
+    """
+
+    token_id = models.CharField(max_length=64, primary_key=True)
+    user_id = models.CharField(max_length=64)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["expires_at"], name="revoked_expires_idx")]
+
+    @classmethod
+    def is_revoked(cls, token_id: str) -> bool:
+        if not token_id:
+            return False
+        return cls.objects.filter(token_id=token_id).exists()
+
+    def __str__(self) -> str:
+        return f"revoked {self.token_id}"

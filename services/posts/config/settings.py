@@ -163,3 +163,21 @@ if not DEBUG:
     SECURE_HSTS_PRELOAD = True
     # Behind a proxy that terminates TLS, so the scheme comes from the header.
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# Tokens are issued by the Go auth service and verified here with its public
+# key, fetched from JWKS and cached. This service never calls auth per request.
+AUTH_JWKS_URL = os.getenv("AUTH_JWKS_URL", "http://auth:8080/.well-known/jwks.json")
+AUTH_ISSUER = os.getenv("AUTH_ISSUER", "http://auth:8080")
+AUTH_AUDIENCE = os.getenv("AUTH_AUDIENCE", "django-flask-kafka")
+
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+# Revocations are a broadcast, so each service consumes them under its own
+# group and receives every message.
+REVOCATION_GROUP_ID = os.getenv("REVOCATION_GROUP_ID", "posts-revocations")
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": ["posts.jwtauth.JWTAuthentication"],
+    # Reads are open, writes need a token. Locking reads down too would be a
+    # different product decision, not a security one.
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticatedOrReadOnly"],
+}
