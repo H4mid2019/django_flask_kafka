@@ -48,6 +48,23 @@ class Post(db.Model):
         }
 
 
+class RevokedToken(db.Model):
+    """Access tokens refused before their expiry.
+
+    In the database rather than process memory because this service runs several
+    gunicorn workers plus a consumer process. An in-memory denylist would only
+    reach whichever process consumed the event, so the same token would be
+    rejected by one worker and accepted by the next.
+    """
+
+    __tablename__ = "revoked_tokens"
+
+    token_id = db.Column(db.String(64), primary_key=True)
+    user_id = db.Column(db.String(64), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    revoked_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(UTC))
+
+
 class ProcessedEvent(db.Model):
     """Every event id this service has already applied.
 

@@ -16,8 +16,9 @@ import os
 import signal
 import string
 import sys
+from datetime import UTC, datetime
 
-from app import Post, ProcessedEvent, app, db
+from app import Post, ProcessedEvent, RevokedToken, app, db
 from kafka import KafkaConsumer
 from sqlalchemy.exc import SQLAlchemyError
 from strsimpy.cosine import Cosine
@@ -30,7 +31,11 @@ logger = logging.getLogger("consumer")
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 GROUP_ID = os.getenv("KAFKA_GROUP_ID", "related-service")
-TOPICS = ["post_created", "post_updated", "post_deleted"]
+# token_revoked rides on the same consumer. The group id is unique to this
+# service, so it receives every revocation, which is what a broadcast needs.
+# Sharing a group with another service would split them and each would see only
+# some.
+TOPICS = ["post_created", "post_updated", "post_deleted", "token_revoked"]
 
 # Loaded once, and deliberately not nltk.corpus.stopwords: that needs a
 # downloaded corpus at import time, which turns a missing data file into an
@@ -132,10 +137,33 @@ def apply_deleted(payload):
             other.related = {k: v for k, v in current.items() if k != slug}
 
 
+def apply_token_revoked(payload):
+    """Refuse an access token before it expires.
+
+    A signed token cannot be withdrawn, so the only way to stop honouring one is
+    for every service to be told. Rows are dropped once the token would have
+    expired anyway.
+    """
+    expires_at = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+    existing = db.session.get(RevokedToken, payload["token_id"])
+    if existing is None:
+        db.session.add(
+            RevokedToken(
+                token_id=payload["token_id"],
+                user_id=payload["user_id"],
+                expires_at=expires_at.replace(tzinfo=None),
+            )
+        )
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    RevokedToken.query.filter(RevokedToken.expires_at <= now).delete()
+
+
 HANDLERS = {
     "post_created": apply_created,
     "post_updated": apply_updated,
     "post_deleted": apply_deleted,
+    "token_revoked": apply_token_revoked,
 }
 
 
