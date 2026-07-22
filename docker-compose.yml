@@ -38,6 +38,41 @@ services:
       timeout: 3s
       retries: 20
 
+  auth-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: auth
+      POSTGRES_USER: auth
+      POSTGRES_PASSWORD: auth
+    volumes:
+      - auth-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth -d auth"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Go. Issues RS256 tokens and publishes its public key at
+  # /.well-known/jwks.json; the Python services verify locally against that and
+  # never call this service per request, so it can restart without taking them
+  # down. Revocations go out on Kafka through its own outbox.
+  auth:
+    build: ./services/auth
+    environment:
+      DATABASE_URL: postgres://auth:auth@auth-db:5432/auth?sslmode=disable
+      LISTEN_ADDR: ":8080"
+      AUTH_ISSUER: http://auth:8080
+      AUTH_AUDIENCE: django-flask-kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ports:
+      - "8080:8080"
+    depends_on:
+      auth-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
   kafka:
     # Official Apache image, KRaft mode, so no Zookeeper.
     image: apache/kafka:3.9.0
@@ -81,6 +116,10 @@ services:
       DJANGO_DEBUG: "true"
       ALLOWED_HOSTS: localhost,127.0.0.1,posts
       POSTGRES_HOST: posts-db
+      AUTH_JWKS_URL: http://auth:8080/.well-known/jwks.json
+      AUTH_ISSUER: http://auth:8080
+      AUTH_AUDIENCE: django-flask-kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     ports:
       - "8000:8000"
     depends_on:
@@ -88,6 +127,21 @@ services:
       # against a schema that has not been applied.
       posts-migrate:
         condition: service_completed_successfully
+
+  posts-revocations:
+    build: ./services/posts
+    command: python manage.py consume_revocations
+    environment:
+      DJANGO_DEBUG: "true"
+      POSTGRES_HOST: posts-db
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REVOCATION_GROUP_ID: posts-revocations
+    depends_on:
+      posts-migrate:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
 
   relay:
     build: ./services/relay
@@ -129,6 +183,9 @@ services:
       DATABASE_URL: postgresql+psycopg://related:related@related-db:5432/related
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_GROUP_ID: related-service
+      AUTH_JWKS_URL: http://auth:8080/.well-known/jwks.json
+      AUTH_ISSUER: http://auth:8080
+      AUTH_AUDIENCE: django-flask-kafka
     depends_on:
       related-migrate:
         condition: service_completed_successfully
@@ -139,3 +196,4 @@ services:
 volumes:
   posts-data:
   related-data:
+  auth-data:

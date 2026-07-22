@@ -2,18 +2,19 @@
 
 [![CI](https://github.com/H4mid2019/django_flask_kafka/actions/workflows/ci.yml/badge.svg)](https://github.com/H4mid2019/django_flask_kafka/actions/workflows/ci.yml)
 
-Two services that each own their database and stay consistent through Kafka
-events, rather than by calling each other.
+Services that each own their database and stay consistent through Kafka events,
+rather than by calling each other.
 
+- **auth** (Go) issues RS256 tokens and publishes its public key. Owns users.
 - **posts** (Django, DRF) owns posts. Every write records an event in an outbox
   table in the same transaction.
-- **relay** reads the outbox and publishes to Kafka.
+- **relay** reads that outbox and publishes to Kafka.
 - **related** (Flask) consumes those events and maintains a table of related
   posts, scored by cosine similarity on titles. It never queries the posts
   service.
 
-The point of the repo is the middle part: making two databases and a broker
-agree when no transaction spans them.
+The point of the repo is what sits between them: making several databases and a
+broker agree when no transaction spans them.
 
 ## Run it
 
@@ -21,14 +22,17 @@ agree when no transaction spans them.
 docker compose up --build
 ```
 
-Posts API on `:8000`, related API on `:5000`.
+Auth on `:8080`, posts on `:8000`, related on `:5000`. Reads are open; writes
+need a token, so the examples below get one first (see Authentication).
 
 ```bash
-curl -X POST localhost:8000/api/posts -H 'content-type: application/json' \
-  -d '{"title":"Kafka streams tutorial","body":"first","slug":"kafka-streams","image":""}'
+# $token comes from the Authentication section below
+AUTH="Authorization: Bearer $token"
+JSON="content-type: application/json"
 
-curl -X POST localhost:8000/api/posts -H 'content-type: application/json' \
-  -d '{"title":"Kafka streams advanced","body":"second","slug":"kafka-advanced","image":""}'
+curl -X POST localhost:8000/api/posts -H "$AUTH" -H "$JSON" -d '{"title":"Kafka streams tutorial","body":"first","slug":"kafka-streams","image":""}'
+
+curl -X POST localhost:8000/api/posts -H "$AUTH" -H "$JSON" -d '{"title":"Kafka streams advanced","body":"second","slug":"kafka-advanced","image":""}'
 
 curl localhost:5000/posts
 ```
@@ -61,8 +65,7 @@ The visible consequence is that the API keeps working when Kafka does not:
 ```bash
 docker compose stop kafka
 
-curl -X POST localhost:8000/api/posts -H 'content-type: application/json' \
-  -d '{"title":"Written while Kafka was down","body":"x","slug":"during-outage","image":""}'
+curl -X POST localhost:8000/api/posts -H "$AUTH" -H "$JSON" -d '{"title":"Written while Kafka was down","body":"x","slug":"during-outage","image":""}'
 # 201 Created
 
 docker compose exec posts-db psql -U posts -d posts -tAc \
@@ -105,6 +108,63 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
 Every event is redelivered from offset 0. Measured after doing exactly that:
 posts unchanged at 2, processed events unchanged at 5, and 5 log lines reading
 `already applied, skipping`.
+
+## Authentication without a per-request hop
+
+The Go service signs access tokens and serves its public key at
+`/.well-known/jwks.json`. The Python services fetch that once, cache it, and
+verify every request in-process.
+
+They never call the auth service to check a token. Doing so would put a network
+hop on the hot path of every request and make auth a hard dependency of both:
+auth restarts for a deploy, everything stops serving. Signature verification
+needs only the public key, so there is no reason to pay that.
+
+```bash
+CREDS='{"email":"you@example.com","password":"a-long-enough-password"}'
+JSON='content-type: application/json'
+
+curl -X POST localhost:8080/register -H "$JSON" -d "$CREDS"
+
+token=$(curl -s -X POST localhost:8080/login -H "$JSON" -d "$CREDS" | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+
+curl -X POST localhost:8000/api/posts -H "Authorization: Bearer $token" -H "$JSON" -d '{"title":"Written with a Go-issued token","body":"x","slug":"with-token","image":""}'
+# 201. Django verified that token locally; the auth service was not contacted.
+```
+
+Reads stay open, writes need a token. Without one the answer is 401, not 403:
+the caller did not say who they are, which is different from not being allowed.
+
+## Revocation, which local verification cannot do alone
+
+A signed token stays valid until it expires. Nothing can withdraw it, so the
+only way to stop honouring one is to tell every service. That is a broadcast,
+and Kafka is already here.
+
+`POST /revoke` writes the revocation and an outbox row in one transaction, and
+the relay publishes it. Each Python service consumes the topic **under its own
+consumer group**, so each receives every revocation. Sharing one group would
+split them and each service would see only some.
+
+Measured on a running stack:
+
+```
+POST /revoke                                  -> 202 Accepted
+posts service refused the token after ~4s
+posts database:    1 row in posts_revokedtoken
+related database:  1 row in revoked_tokens
+```
+
+The denylist lives in each service's database, not in process memory, because
+both run several gunicorn workers. An in-memory list would only reach whichever
+worker consumed the event, so the same token would be rejected by one worker and
+accepted by the next. Rows are dropped once the token would have expired anyway,
+so the table stays bounded.
+
+Access tokens last 15 minutes, which bounds the damage if a service misses the
+message entirely. Refresh tokens are stored hashed and rotate on use: redeeming
+one revokes it, so a stolen refresh token replayed after the real client has
+already refreshed fails instead of minting a second session.
 
 ## Design decisions
 
@@ -160,7 +220,8 @@ Each is now covered by a test:
 ## Tests
 
 ```bash
-cd services/posts   && python manage.py test    # outbox atomicity, event content
+cd services/auth    && go test ./...             # tokens, JWKS, argon2id
+cd services/posts   && python manage.py test    # outbox atomicity, auth, revocation
 cd services/related && python -m pytest tests/  # handlers, similarity, idempotency
 ```
 
@@ -172,6 +233,7 @@ then stops the broker and checks the event queues and drains.
 ## Layout
 
 ```
+services/auth/      Go: issues RS256 tokens, serves JWKS, publishes revocations
 services/posts/     Django API, Post and OutboxEvent written in one transaction
 services/relay/     reads the outbox, publishes to Kafka, marks rows published
 services/related/   Flask API and Kafka consumer, owns the related-posts database
@@ -180,7 +242,10 @@ docker-compose.yml  both databases, Kafka in KRaft mode, all three services
 
 ## Not implemented
 
-No dead letter queue, so a message that fails repeatedly blocks its partition.
+No key rotation: the signing key is loaded once, and rotating it would need the
+JWKS to serve both keys during the overlap. No roles or scopes, so a valid token
+authorises any write. No rate limiting on login. No dead letter queue, so a
+message that fails repeatedly blocks its partition.
 No schema registry, so the payload contract is a convention rather than
 something enforced. No outbox cleanup, so published rows accumulate. Similarity
 is recomputed against every post on each event, which is fine for hundreds and
