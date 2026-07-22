@@ -90,8 +90,9 @@ jobs:
       - run: go test -race ./...
 
   end-to-end:
-    # The claim this repo makes is that a write in one service reaches the other
-    # through Kafka. That is only worth believing if something checks it.
+    # The claims this repo makes are that a write in one service reaches the
+    # other through Kafka, that the outbox survives a broker outage, and that a
+    # revocation reaches every service. Only worth believing if checked.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -99,21 +100,32 @@ jobs:
       - name: Start the stack
         run: docker compose up -d --build
 
-      - name: Wait for both APIs
+      - name: Wait for the APIs
         run: |
           for i in $(seq 1 60); do
-            curl -fs localhost:8000/api/posts >/dev/null 2>&1 && \
-            curl -fs localhost:5000/health >/dev/null 2>&1 && exit 0
+            if curl -fs localhost:8000/api/posts >/dev/null 2>&1                && curl -fs localhost:5000/health >/dev/null 2>&1                && curl -fs localhost:8080/healthz >/dev/null 2>&1; then
+              exit 0
+            fi
             sleep 3
           done
           docker compose logs
           exit 1
 
+      - name: Writes need a token issued by the Go service
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8000/api/posts             -H 'content-type: application/json'             -d '{"title":"No token","body":"x","slug":"no-token","image":""}')
+          [ "$code" = "401" ] || { echo "unauthenticated write returned $code, expected 401"; exit 1; }
+          echo "unauthenticated write rejected"
+
+          curl -fsS -X POST localhost:8080/register -H 'content-type: application/json'             -d '{"email":"ci@example.com","password":"a-long-enough-password"}' >/dev/null
+          curl -fsS -X POST localhost:8080/login -H 'content-type: application/json'             -d '{"email":"ci@example.com","password":"a-long-enough-password"}'             | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])' > /tmp/token
+          echo "token issued"
+
       - name: A post created in one service reaches the other
         run: |
-          curl -fsS -X POST localhost:8000/api/posts \
-            -H 'content-type: application/json' \
-            -d '{"title":"Kafka streams tutorial","body":"b","slug":"ci-one","image":""}'
+          token=$(cat /tmp/token)
+          # Django verifies this locally against the Go service's JWKS.
+          curl -fsS -X POST localhost:8000/api/posts             -H "Authorization: Bearer $token" -H 'content-type: application/json'             -d '{"title":"Kafka streams tutorial","body":"b","slug":"ci-one","image":""}' >/dev/null
 
           for i in $(seq 1 40); do
             if curl -fs localhost:5000/posts/ci-one >/dev/null 2>&1; then
@@ -129,13 +141,11 @@ jobs:
 
       - name: The outbox survives a broker outage
         run: |
+          token=$(cat /tmp/token)
           docker compose stop kafka
-          curl -fsS -X POST localhost:8000/api/posts \
-            -H 'content-type: application/json' \
-            -d '{"title":"Written during an outage","body":"b","slug":"ci-outage","image":""}'
+          curl -fsS -X POST localhost:8000/api/posts             -H "Authorization: Bearer $token" -H 'content-type: application/json'             -d '{"title":"Written during an outage","body":"b","slug":"ci-outage","image":""}' >/dev/null
 
-          pending=$(docker compose exec -T posts-db psql -U posts -d posts -tAc \
-            "SELECT count(*) FROM posts_outboxevent WHERE published_at IS NULL")
+          pending=$(docker compose exec -T posts-db psql -U posts -d posts -tAc             "SELECT count(*) FROM posts_outboxevent WHERE published_at IS NULL")
           echo "pending events while the broker is down: $pending"
           [ "$pending" -ge 1 ] || { echo "expected the event to queue"; exit 1; }
 
@@ -148,6 +158,23 @@ jobs:
             sleep 3
           done
           docker compose logs relay
+          exit 1
+
+      # Last, because it invalidates the token the steps above rely on.
+      - name: Revoking a token reaches the other services over Kafka
+        run: |
+          token=$(cat /tmp/token)
+          curl -fsS -X POST localhost:8080/revoke -H "Authorization: Bearer $token" >/dev/null
+
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8000/api/posts               -H "Authorization: Bearer $token" -H 'content-type: application/json'               -d "{\"title\":\"after\",\"body\":\"x\",\"slug\":\"after-$i\",\"image\":\"\"}")
+            if [ "$code" = "401" ]; then
+              echo "revocation propagated, token refused after ~$((i*2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs auth posts-revocations
           exit 1
 
       - name: Stop the stack
